@@ -2,6 +2,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
+import re
 import os
 
 load_dotenv()
@@ -18,8 +19,12 @@ async def on_ready():
     print(f"Logged in as {bot.user} (ID: {bot.user.id})")
 
 
+def is_separator(name: str) -> bool:
+    # Skip decorative categories that have no real alphanumeric text
+    return not bool(re.search(r"[a-zA-Z0-9]", name))
+
+
 def get_channel_lines(role: discord.Role, guild: discord.Guild) -> list[str]:
-    # Group text channels by category, sorted by position
     cats: dict[int | None, dict] = {}
 
     for channel in sorted(
@@ -30,30 +35,33 @@ def get_channel_lines(role: discord.Role, guild: discord.Guild) -> list[str]:
         if not perms.view_channel:
             continue
 
-        can_send = perms.send_messages
         cat_id = channel.category_id
+        cat_name = channel.category.name if channel.category else "Uncategorized"
+
+        if is_separator(cat_name):
+            continue
 
         if cat_id not in cats:
             cats[cat_id] = {
-                "name": channel.category.name if channel.category else "Uncategorized",
+                "name": cat_name,
                 "position": channel.category.position if channel.category else -1,
                 "channels": [],
             }
-        cats[cat_id]["channels"].append((channel, can_send))
+        cats[cat_id]["channels"].append((channel, perms.send_messages))
 
     lines = []
     for cat in sorted(cats.values(), key=lambda c: c["position"]):
-        lines.append(f"\n📁  **{cat['name'].upper()}**")
+        lines.append(f"\n**📁 {cat['name']}**")
         for channel, can_send in cat["channels"]:
             emoji = "💬" if can_send else "👁️"
-            lines.append(f"　{emoji}  {channel.mention}")
+            lines.append(f"> {emoji} {channel.mention}")
 
     return lines
 
 
-def chunk_messages(header: list[str], body: list[str]) -> list[str]:
+def chunk_messages(header: str, body: list[str]) -> list[str]:
     messages: list[str] = []
-    current = "\n".join(header) + "\n"
+    current = header
 
     for line in body:
         chunk = line + "\n"
@@ -81,12 +89,12 @@ async def channel_list(
 ):
     await interaction.response.defer(ephemeral=not public)
 
-    header = [
-        f"📋  **Channel Access — @{role.name}**",
-        f"🏠  {interaction.guild.name}",
-        "",
-        f"💬  = can view & send　　👁️  = view only",
-    ]
+    header = (
+        f"📋 **Channel Access — @{role.name}**\n"
+        f"🏠 {interaction.guild.name}\n"
+        f"\n"
+        f"💬 = view & send  |  👁️ = view only\n"
+    )
 
     body = get_channel_lines(role, interaction.guild)
     if not body:
