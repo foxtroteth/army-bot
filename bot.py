@@ -54,7 +54,7 @@ def get_channel_lines(role: discord.Role, guild: discord.Guild) -> list[str]:
         lines.append(f"\n**📁 {cat['name']}**")
         for channel, can_send in cat["channels"]:
             emoji = "💬" if can_send else "👁️"
-            lines.append(f"> {emoji} {channel.mention}")
+            lines.append(f"- {emoji} {channel.mention}")
 
     return lines
 
@@ -65,7 +65,7 @@ def chunk_messages(header: str, body: list[str]) -> list[str]:
 
     for line in body:
         chunk = line + "\n"
-        if len(current) + len(chunk) > 1900:
+        if len(current) + len(chunk) > 1500:
             messages.append(current)
             current = chunk
         else:
