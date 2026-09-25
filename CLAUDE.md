@@ -9,11 +9,12 @@ ArmyBot is a Discord bot with a single slash command (`/channel-list`) that list
 ## Running the bot
 
 ```bash
-# Install dependencies
-pip3 install -r requirements.txt
+# Install dependencies into the project virtualenv
+python3.12 -m venv .venv
+.venv/bin/pip install -r requirements.txt
 
 # Run
-python3 bot.py
+.venv/bin/python bot.py
 ```
 
 Requires a `.env` file in the project root with:
@@ -41,4 +42,8 @@ Everything lives in `bot.py`. The command flow is:
 
 ## Deployment
 
-Deployed on Railway. It auto-deploys on every push to `main`. The `DISCORD_TOKEN` environment variable is set in Railway's Variables tab — it is not committed to the repo.
+Runs 24/7 on a Mac mini as a launchd LaunchAgent labelled `com.apex.army-bot`, checked out at `~/army-bot` with a virtualenv in `.venv`. The template lives in `deploy/com.apex.army-bot.plist` (`__HOME__` is substituted at install time). launchd starts it at login, restarts it on crash, and writes output to `~/army-bot/logs/stdout.log` and `stderr.log`. `DISCORD_TOKEN` lives in `~/army-bot/.env` on the Mac mini and is never committed (`.env`, `logs/` and `.venv/` are gitignored).
+
+Pushing to `main` does **not** auto-deploy. To ship: `cd ~/army-bot && git pull && launchctl kickstart -k gui/$(id -u)/com.apex.army-bot`. See `DEPLOY.md` for full setup, logs, and stop/restart commands.
+
+Output is unbuffered (`PYTHONUNBUFFERED=1` in the plist) so `print` calls reach the log file immediately. Keep that if you change how the bot is launched.
