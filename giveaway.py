@@ -300,6 +300,32 @@ class FeedbackView(discord.ui.View):
         await self.cog.handle_feedback_button(interaction)
 
 
+# Permissions a giveaway reward role must never carry: anyone who submits a wallet gets it
+_DANGEROUS_PERMS = (
+    "administrator", "manage_guild", "manage_roles", "manage_channels", "manage_webhooks",
+    "manage_messages", "ban_members", "kick_members", "moderate_members", "mention_everyone",
+)
+
+
+def gacha_role_problem(invoker: discord.Member, role: discord.Role) -> str | None:
+    """Why this role can't be the gacha role, or None if it's fine.
+
+    The bot hands this role to every submitter, so it must be a role the admin
+    could assign by hand and must not grant moderation powers.
+    """
+    if role.is_default() or role.managed:
+        return f"{role.mention} can't be assigned (it's @everyone or managed by an integration)."
+    risky = [p for p in _DANGEROUS_PERMS if getattr(role.permissions, p)]
+    if risky:
+        return (f"{role.mention} has elevated permissions ({', '.join(risky)}). "
+                "Pick a plain role with no moderation permissions.")
+    if invoker.id != invoker.guild.owner_id and not (
+        invoker.guild_permissions.manage_roles and role < invoker.top_role
+    ):
+        return f"You need Manage Roles and a role above {role.mention} to make it the giveaway role."
+    return None
+
+
 def admin_command(**kwargs):
     # Only visible to members with Manage Server by default (adjustable in Server Settings > Integrations)
     def wrap(func):
@@ -512,6 +538,11 @@ class Giveaway(commands.Cog):
                 f"above {gacha_role.mention} in Server Settings > Roles, then run this again.",
                 ephemeral=True,
             )
+            return
+
+        problem = gacha_role_problem(interaction.user, gacha_role)
+        if problem:
+            await interaction.response.send_message(f"❌ {problem}", ephemeral=True)
             return
 
         self.store.save(phase="wallet", cap=cap, gacha_role_id=gacha_role.id)
