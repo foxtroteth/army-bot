@@ -326,6 +326,42 @@ def gacha_role_problem(invoker: discord.Member, role: discord.Role) -> str | Non
     return None
 
 
+class RolePickView(discord.ui.View):
+    """Ephemeral multi-select for adding or removing several eligible roles at once."""
+
+    def __init__(self, cog: "Giveaway", guild: discord.Guild, form: str, action: str):
+        super().__init__(timeout=300)
+        self.cog, self.form, self.action = cog, form, action
+        current = cog.store.role_ids(form)
+        if action == "remove" and len(current) <= 25:
+            # Removing: list only the roles currently on the form
+            options = [discord.SelectOption(label=(guild.get_role(i).name if guild.get_role(i) else str(i))[:100],
+                                            value=str(i)) for i in current]
+            self.picker = discord.ui.Select(placeholder="Roles to remove", min_values=1,
+                                            max_values=len(options), options=options)
+        else:
+            self.picker = discord.ui.RoleSelect(
+                placeholder="Roles to add" if action == "add" else "Roles to remove",
+                min_values=1, max_values=25,
+            )
+        self.picker.callback = self.on_pick
+        self.add_item(self.picker)
+
+    async def on_pick(self, interaction: discord.Interaction):
+        if isinstance(self.picker, discord.ui.RoleSelect):
+            ids = [r.id for r in self.picker.values]
+        else:
+            ids = [int(v) for v in self.picker.values]
+        self.stop()
+        await interaction.response.defer()
+        note = self.cog.apply_role_change(self.form, self.action, ids)
+        await self.cog.after_role_change(self.form)
+        await interaction.edit_original_response(
+            content=note, embed=await self.cog.role_summary(interaction.guild, self.form), view=None,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+
 def admin_command(**kwargs):
     # Only visible to members with Manage Server by default (adjustable in Server Settings > Integrations)
     def wrap(func):
@@ -561,23 +597,61 @@ class Giveaway(commands.Cog):
             ephemeral=True,
         )
 
-    @admin_command(name="giveaway-role-add", description="Allow a role to use the wallet or feedback form")
-    @app_commands.describe(form="Which form", role="Role to allow")
-    async def giveaway_role_add(self, interaction: discord.Interaction, form: Form, role: discord.Role):
-        ids = self.store.role_ids(form)
-        note = f"{role.mention} was already on the list." if role.id in ids else f"Added {role.mention}."
-        self.store.set_role_ids(form, ids + [role.id])
-        await self.after_role_change(interaction, form, note)
+    @admin_command(name="giveaway-role-add",
+                   description="Allow roles to use the wallet or feedback form (leave role empty to pick several)")
+    @app_commands.describe(form="Which form", role="One role to allow; leave empty to pick several from a list")
+    async def giveaway_role_add(self, interaction: discord.Interaction, form: Form,
+                                role: discord.Role | None = None):
+        await self.edit_roles(interaction, form, "add", role)
 
-    @admin_command(name="giveaway-role-remove", description="Stop a role from using the wallet or feedback form")
-    @app_commands.describe(form="Which form", role="Role to remove")
-    async def giveaway_role_remove(self, interaction: discord.Interaction, form: Form, role: discord.Role):
-        ids = self.store.role_ids(form)
-        note = f"Removed {role.mention}." if role.id in ids else f"{role.mention} wasn't on the list."
-        self.store.set_role_ids(form, [i for i in ids if i != role.id])
-        if not self.store.role_ids(form):
-            note += " ⚠️ No roles left, so nobody can use this form now."
-        await self.after_role_change(interaction, form, note)
+    @admin_command(name="giveaway-role-remove",
+                   description="Stop roles from using the wallet or feedback form (leave role empty to pick several)")
+    @app_commands.describe(form="Which form", role="One role to remove; leave empty to pick several from a list")
+    async def giveaway_role_remove(self, interaction: discord.Interaction, form: Form,
+                                   role: discord.Role | None = None):
+        await self.edit_roles(interaction, form, "remove", role)
+
+    async def edit_roles(self, interaction: discord.Interaction, form: str, action: str,
+                         role: discord.Role | None):
+        # Defer first: the panel edit and count lookup can take longer than Discord's 3s reply window
+        await interaction.response.defer(ephemeral=True)
+        if role:
+            note = self.apply_role_change(form, action, [role.id])
+            await self.after_role_change(form)
+            await interaction.followup.send(
+                note, embed=await self.role_summary(interaction.guild, form), ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        if action == "remove" and not self.store.role_ids(form):
+            await interaction.followup.send(f"The {form} form has no roles to remove.", ephemeral=True)
+            return
+        verb = "add to" if action == "add" else "remove from"
+        await interaction.followup.send(
+            f"Pick the roles to **{verb}** the **{form}** form (up to 25 at once; run the command again for more).",
+            embed=await self.role_summary(interaction.guild, form),
+            view=RolePickView(self, interaction.guild, form, action),
+            ephemeral=True,
+        )
+
+    def apply_role_change(self, form: str, action: str, role_ids: list[int]) -> str:
+        """Adds or removes roles from a form's list and returns a note describing what changed."""
+        current = self.store.role_ids(form)
+        if action == "add":
+            changed = [i for i in role_ids if i not in current]
+            self.store.set_role_ids(form, current + changed)
+            skipped, did, skip_text = [i for i in role_ids if i in current], "Added", "already on the list"
+        else:
+            changed = [i for i in role_ids if i in current]
+            self.store.set_role_ids(form, [i for i in current if i not in role_ids])
+            skipped, did, skip_text = [i for i in role_ids if i not in current], "Removed", "weren't on the list"
+        mentions = lambda ids: ", ".join(f"<@&{i}>" for i in ids)
+        parts = [f"{did} {mentions(changed)}." if changed else "Nothing changed."]
+        if skipped:
+            parts.append(f"Skipped ({skip_text}): {mentions(skipped)}.")
+        if action == "remove" and not self.store.role_ids(form):
+            parts.append("⚠️ No roles left, so nobody can use this form now.")
+        return " ".join(parts)
 
     @admin_command(name="giveaway-roles", description="Show eligible roles and member counts for a form")
     @app_commands.describe(form="Which form (default: both)")
@@ -588,16 +662,10 @@ class Giveaway(commands.Cog):
             embeds=[await self.role_summary(interaction.guild, f) for f in forms], ephemeral=True,
         )
 
-    async def after_role_change(self, interaction: discord.Interaction, form: str, note: str):
+    async def after_role_change(self, form: str):
         # The live panel lists the eligible roles, so redraw it if it's showing this form
-        # Defer first: the panel edit and count lookup can take longer than Discord's 3s reply window
-        await interaction.response.defer(ephemeral=True)
         if self.store.phase == form:
             await self.refresh_panel()
-        await interaction.followup.send(
-            note, embed=await self.role_summary(interaction.guild, form), ephemeral=True,
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
 
     @admin_command(name="giveaway-feedback",
                    description="Close wallet submissions and post the feedback panel in this channel")
