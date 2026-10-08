@@ -37,9 +37,10 @@ Slash commands sync automatically on startup via `bot.tree.sync()` in `on_ready`
 
 Loaded as an extension from `setup_hook` in `bot.py`. All `/giveaway-*` commands are admin-only (`default_permissions(manage_guild=True)`), so regular members never see them. Members interact only through panel buttons that admins post into role-locked channels.
 
-- **Flow:** `/giveaway-start` (pick the gacha role, up to 8 eligible roles, cap default 500) posts the wallet panel (**Submit wallet** + **Check Wallet**, which shows the member their saved wallet) in the current channel. `/giveaway-feedback` closes the wallet panel and posts a feedback panel in the channel it is run in. `/giveaway-close` removes the panel button. `/giveaway-stats` and `/giveaway-export` (CSV) read the data.
+- **Flow:** `/giveaway-start` (gacha role, optional first eligible role, cap default 500) posts the wallet panel (**Submit wallet** + **Check Wallet**, which shows the member their saved wallet) in the current channel. `/giveaway-feedback` closes the wallet panel and posts a feedback panel in the channel it is run in. `/giveaway-close` removes the panel button. `/giveaway-stats` and `/giveaway-export` (CSV) read the data.
+- **Eligible roles:** each form (`wallet`, `feedback`) has its own unlimited role list in settings (`wallet_role_ids`, `feedback_role_ids`). `/giveaway-role-add` and `/giveaway-role-remove` edit it, `/giveaway-roles` shows it. Every reply includes member counts per role and unique members across them (`role_summary`), which relies on the members intent. The feedback list starts as just the gacha role. The live panel lists the roles and is redrawn on change. Roles deleted from the server are pruned when a summary is built.
 - **Storage:** `GiveawayStore` wraps SQLite at `data/armybot.db` (gitignored). One row per Discord user holds their wallet and feedback, so the CSV export is "the sheet". Settings (phase, roles, cap, panel message location) live in the `settings` table, not `.env`.
-- **Rules:** wallets must decode as 32-byte base58 (Solana). One wallet per user (resubmitting replaces it without using a slot). A wallet can't belong to two users. The cap counts users with a wallet. Feedback requires the gacha role.
+- **Rules:** wallets must decode as 32-byte base58 (Solana). One wallet per user (resubmitting replaces it without using a slot). A wallet can't belong to two users. The cap counts users with a wallet. Feedback requires a role from the feedback list.
 - **Persistent buttons:** `WalletView`/`FeedbackView` use `timeout=None` and fixed `custom_id`s (`giveaway:wallet`, `giveaway:mywallet`, `giveaway:feedback`) and are registered in `cog_load`. Do not change those IDs or panels already posted stop working.
 - **Cap race safety:** `submit_wallet` does the count check and insert with no `await` in between, so concurrent submissions can't exceed the cap. Keep it synchronous.
 - **Role grant:** the bot needs Manage Roles and its top role must be above the gacha role. `/giveaway-start` checks this. A failed role grant still keeps the wallet and tells the member a mod will add the role.
@@ -50,7 +51,7 @@ Loaded as an extension from `setup_hook` in `bot.py`. All `/giveaway-*` commands
 - **Do not use `>` (blockquote) syntax** before channel mentions. Discord does not render `<#channel_id>` as a clickable mention inside blockquote lines in ephemeral followup messages. Use `- ` bullet list prefix instead.
 - **Chunk size is 1500**, not 2000. Keep it at or below 1500 to avoid mention rendering failures.
 - **`await interaction.response.defer()`** must be called before any async work. All replies after that must use `interaction.followup.send()`, not `interaction.response.send_message()`.
-- The bot only needs the `guilds` intent. Do not enable `message_content` or `members` privileged intents — they are not needed and require additional approval from Discord.
+- Intents: `guilds` plus the privileged `members` intent (for role member counts in the giveaway). `members` must also be switched on in the Discord Developer Portal (Bot > Server Members Intent), otherwise login fails and launchd restarts the bot in a loop. Do not enable `message_content`; it is not needed.
 
 ## Deployment
 

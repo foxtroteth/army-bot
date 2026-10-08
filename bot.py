@@ -9,6 +9,9 @@ load_dotenv()
 
 intents = discord.Intents.default()
 intents.guilds = True
+# Needed for member counts per role in /giveaway-roles. Must also be switched on in the
+# Discord Developer Portal (Bot > Server Members Intent) or the bot can't log in.
+intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 

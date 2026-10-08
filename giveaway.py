@@ -13,6 +13,7 @@ import sqlite3
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 
 import discord
 from discord import app_commands
@@ -20,6 +21,8 @@ from discord.ext import commands
 
 DB_PATH = Path(__file__).parent / "data" / "armybot.db"
 DEFAULT_CAP = 500
+FORMS = ("wallet", "feedback")
+Form = Literal["wallet", "feedback"]
 
 _B58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 
@@ -98,9 +101,12 @@ class GiveawayStore:
         value = self.get("gacha_role_id")
         return int(value) if value else None
 
-    @property
-    def eligible_role_ids(self) -> set[int]:
-        return {int(r) for r in (self.get("eligible_role_ids") or "").split(",") if r}
+    def role_ids(self, form: str) -> list[int]:
+        # Roles allowed to use a form ("wallet" or "feedback"); no limit on how many
+        return [int(r) for r in (self.get(f"{form}_role_ids") or "").split(",") if r]
+
+    def set_role_ids(self, form: str, ids: list[int]) -> None:
+        self.save(**{f"{form}_role_ids": ",".join(str(i) for i in dict.fromkeys(ids))})
 
     # --- submissions ---
 
@@ -193,6 +199,13 @@ class GiveawayStore:
 # --- Discord UI ---
 
 
+def role_list(ids: list[int], limit: int = 30) -> str:
+    if not ids:
+        return "_nobody yet_"
+    shown = ", ".join(f"<@&{i}>" for i in ids[:limit])
+    return shown + (f" and {len(ids) - limit} more" if len(ids) > limit else "")
+
+
 def panel_embed(store: GiveawayStore) -> discord.Embed:
     count, cap = store.wallet_count(), store.cap
     if store.phase == "wallet":
@@ -201,7 +214,8 @@ def panel_embed(store: GiveawayStore) -> discord.Embed:
             title="🎴 Free Gacha Card Giveaway",
             description=(
                 "Click **Submit wallet** and paste your **Solana wallet address**.\n"
-                "Open to LP Army and activity role holders. One wallet per person, "
+                f"Open to: {role_list(store.role_ids('wallet'))}\n"
+                "One wallet per person, "
                 "you can resubmit to fix a typo. Click **Check Wallet** to see what you submitted.\n\n"
                 + ("**All spots are taken.**" if full else f"**{count} / {cap}** spots claimed")
             ),
@@ -212,7 +226,8 @@ def panel_embed(store: GiveawayStore) -> discord.Embed:
             title="📝 Gacha Card Feedback",
             description=(
                 "Cards are out! If you received one, click **Give feedback** and tell us "
-                "whether everything worked or if you ran into any bugs."
+                "whether everything worked or if you ran into any bugs.\n\n"
+                f"Open to: {role_list(store.role_ids('feedback'))}"
             ),
             color=discord.Color.blurple(),
         )
@@ -304,12 +319,38 @@ class Giveaway(commands.Cog):
 
     # --- helpers ---
 
-    def eligible_roles(self, member: discord.Member) -> list[discord.Role]:
-        allowed = self.store.eligible_role_ids
+    def member_roles(self, member: discord.Member, form: str) -> list[discord.Role]:
+        """The member's roles that are allowed to use this form."""
+        allowed = set(self.store.role_ids(form))
         return [r for r in member.roles if r.id in allowed]
 
-    def has_gacha_role(self, member: discord.Member) -> bool:
-        return any(r.id == self.store.gacha_role_id for r in member.roles)
+    def role_summary(self, guild: discord.Guild, form: str) -> discord.Embed:
+        # Roles deleted from the server can't be picked in /giveaway-role-remove, so drop them here
+        ids = self.store.role_ids(form)
+        live = [i for i in ids if guild.get_role(i)]
+        if len(live) != len(ids):
+            self.store.set_role_ids(form, live)
+        lines, unique = [], set()
+        for role_id in live:
+            role = guild.get_role(role_id)
+            unique.update(m.id for m in role.members)
+            lines.append(f"- {role.mention}: **{len(role.members)}** members")
+        body = "\n".join(lines) or "_No roles yet. Add one with /giveaway-role-add._"
+        if len(live) != len(ids):
+            body += f"\n\n_Removed {len(ids) - len(live)} role(s) that were deleted from the server._"
+        ids = live
+        if len(body) > 3800:  # embed description limit is 4096
+            body = body[:3800].rsplit("\n", 1)[0] + "\n- ..."
+        embed = discord.Embed(
+            title=f"{'💳 Wallet' if form == 'wallet' else '📝 Feedback'} form: eligible roles",
+            description=body,
+            color=discord.Color.gold() if form == "wallet" else discord.Color.blurple(),
+        )
+        embed.add_field(name="Roles", value=str(len(ids)))
+        embed.add_field(name="Unique members", value=f"**{len(unique)}**")
+        if not guild.chunked:
+            embed.set_footer(text="Member list still loading; counts may be low. Try again in a minute.")
+        return embed
 
     def current_view(self) -> discord.ui.View | None:
         # Closed panels lose their button entirely (view=None removes components)
@@ -334,9 +375,9 @@ class Giveaway(commands.Cog):
         if self.store.phase != "wallet":
             await interaction.response.send_message("Wallet submissions are closed.", ephemeral=True)
             return
-        if not self.eligible_roles(interaction.user):
+        if not self.member_roles(interaction.user, "wallet"):
             await interaction.response.send_message(
-                "❌ Sorry, this giveaway is only for LP Army and activity role holders.", ephemeral=True
+                "❌ Sorry, you don't have a role that's eligible for this giveaway.", ephemeral=True
             )
             return
         existing = self.store.get_submission(interaction.user.id)
@@ -361,7 +402,7 @@ class Giveaway(commands.Cog):
     async def handle_wallet_submit(self, interaction: discord.Interaction, wallet: str):
         member = interaction.user
         # Re-check: phase, roles and cap may have changed while the modal was open
-        roles = self.eligible_roles(member)
+        roles = self.member_roles(member, "wallet")
         if self.store.phase != "wallet" or not roles:
             await interaction.response.send_message("❌ You can't submit a wallet right now.", ephemeral=True)
             return
@@ -415,15 +456,15 @@ class Giveaway(commands.Cog):
         if self.store.phase != "feedback":
             await interaction.response.send_message("Feedback is closed.", ephemeral=True)
             return
-        if not self.has_gacha_role(interaction.user):
+        if not self.member_roles(interaction.user, "feedback"):
             await interaction.response.send_message(
-                "❌ Feedback is only open to members with the gacha role.", ephemeral=True
+                "❌ Sorry, feedback is only open to giveaway participants.", ephemeral=True
             )
             return
         await interaction.response.send_modal(FeedbackModal(self))
 
     async def handle_feedback_submit(self, interaction: discord.Interaction, worked: str, feedback: str):
-        if self.store.phase != "feedback" or not self.has_gacha_role(interaction.user):
+        if self.store.phase != "feedback" or not self.member_roles(interaction.user, "feedback"):
             await interaction.response.send_message("❌ You can't send feedback right now.", ephemeral=True)
             return
         replaced = self.store.submit_feedback(interaction.user.id, str(interaction.user), worked, feedback)
@@ -436,25 +477,16 @@ class Giveaway(commands.Cog):
     @admin_command(name="giveaway-start", description="Post the wallet submission panel in this channel")
     @app_commands.describe(
         gacha_role="Role given to everyone who submits a wallet",
-        eligible_1="A role allowed to submit (e.g. LP Army)",
+        eligible_role="A role allowed to submit (add more with /giveaway-role-add)",
         cap="Maximum number of wallets (default 500)",
     )
     async def giveaway_start(
         self,
         interaction: discord.Interaction,
         gacha_role: discord.Role,
-        eligible_1: discord.Role,
-        eligible_2: discord.Role | None = None,
-        eligible_3: discord.Role | None = None,
-        eligible_4: discord.Role | None = None,
-        eligible_5: discord.Role | None = None,
-        eligible_6: discord.Role | None = None,
-        eligible_7: discord.Role | None = None,
-        eligible_8: discord.Role | None = None,
+        eligible_role: discord.Role | None = None,
         cap: app_commands.Range[int, 1, 10000] = DEFAULT_CAP,
     ):
-        eligible = [r for r in (eligible_1, eligible_2, eligible_3, eligible_4,
-                                eligible_5, eligible_6, eligible_7, eligible_8) if r]
         me = interaction.guild.me
         if not me.guild_permissions.manage_roles or gacha_role >= me.top_role:
             await interaction.response.send_message(
@@ -464,19 +496,55 @@ class Giveaway(commands.Cog):
             )
             return
 
-        self.store.save(
-            phase="wallet",
-            cap=cap,
-            gacha_role_id=gacha_role.id,
-            eligible_role_ids=",".join(str(r.id) for r in eligible),
-        )
+        self.store.save(phase="wallet", cap=cap, gacha_role_id=gacha_role.id)
+        if eligible_role:
+            self.store.set_role_ids("wallet", self.store.role_ids("wallet") + [eligible_role.id])
+        if not self.store.role_ids("feedback"):
+            self.store.set_role_ids("feedback", [gacha_role.id])
+
         await interaction.response.send_message(embed=panel_embed(self.store), view=WalletView(self))
         message = await interaction.original_response()
         self.store.save(panel_channel_id=message.channel.id, panel_message_id=message.id)
         await interaction.followup.send(
-            f"Giveaway open. Eligible: {', '.join(r.mention for r in eligible)}. "
-            f"Gacha role: {gacha_role.mention}. Cap: {cap}.",
+            f"Giveaway open. Gacha role: {gacha_role.mention}. Cap: {cap}. "
+            "Add or remove eligible roles any time with /giveaway-role-add and /giveaway-role-remove.",
+            embed=self.role_summary(interaction.guild, "wallet"),
             ephemeral=True,
+        )
+
+    @admin_command(name="giveaway-role-add", description="Allow a role to use the wallet or feedback form")
+    @app_commands.describe(form="Which form", role="Role to allow")
+    async def giveaway_role_add(self, interaction: discord.Interaction, form: Form, role: discord.Role):
+        ids = self.store.role_ids(form)
+        note = f"{role.mention} was already on the list." if role.id in ids else f"Added {role.mention}."
+        self.store.set_role_ids(form, ids + [role.id])
+        await self.after_role_change(interaction, form, note)
+
+    @admin_command(name="giveaway-role-remove", description="Stop a role from using the wallet or feedback form")
+    @app_commands.describe(form="Which form", role="Role to remove")
+    async def giveaway_role_remove(self, interaction: discord.Interaction, form: Form, role: discord.Role):
+        ids = self.store.role_ids(form)
+        note = f"Removed {role.mention}." if role.id in ids else f"{role.mention} wasn't on the list."
+        self.store.set_role_ids(form, [i for i in ids if i != role.id])
+        if not self.store.role_ids(form):
+            note += " ⚠️ No roles left, so nobody can use this form now."
+        await self.after_role_change(interaction, form, note)
+
+    @admin_command(name="giveaway-roles", description="Show eligible roles and member counts for a form")
+    @app_commands.describe(form="Which form (default: both)")
+    async def giveaway_roles(self, interaction: discord.Interaction, form: Form | None = None):
+        forms = [form] if form else list(FORMS)
+        await interaction.response.send_message(
+            embeds=[self.role_summary(interaction.guild, f) for f in forms], ephemeral=True,
+        )
+
+    async def after_role_change(self, interaction: discord.Interaction, form: str, note: str):
+        # The live panel lists the eligible roles, so redraw it if it's showing this form
+        if self.store.phase == form:
+            await self.refresh_panel()
+        await interaction.response.send_message(
+            note, embed=self.role_summary(interaction.guild, form), ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
         )
 
     @admin_command(name="giveaway-feedback",
@@ -485,6 +553,8 @@ class Giveaway(commands.Cog):
         if not self.store.gacha_role_id:
             await interaction.response.send_message("Run /giveaway-start first.", ephemeral=True)
             return
+        if not self.store.role_ids("feedback"):
+            self.store.set_role_ids("feedback", [self.store.gacha_role_id])
         # The old wallet panel (possibly in another channel) becomes a closed panel with no button
         self.store.save(phase="closed")
         await self.refresh_panel()
@@ -493,10 +563,10 @@ class Giveaway(commands.Cog):
         await interaction.response.send_message(embed=panel_embed(self.store), view=FeedbackView(self))
         message = await interaction.original_response()
         self.store.save(panel_channel_id=message.channel.id, panel_message_id=message.id)
-        gacha = interaction.guild.get_role(self.store.gacha_role_id)
         await interaction.followup.send(
-            f"Feedback open for {gacha.mention if gacha else 'the gacha role'}. "
-            "Wallet submissions are closed. Make sure this channel is visible to that role.",
+            "Feedback open, wallet submissions closed. Make sure these roles can see this channel. "
+            "Change them with /giveaway-role-add and /giveaway-role-remove (form: feedback).",
+            embed=self.role_summary(interaction.guild, "feedback"),
             ephemeral=True,
         )
 
