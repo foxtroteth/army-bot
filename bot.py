@@ -14,6 +14,11 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 
 @bot.event
+async def setup_hook():
+    await bot.load_extension("giveaway")
+
+
+@bot.event
 async def on_ready():
     await bot.tree.sync()
     print(f"Logged in as {bot.user} (ID: {bot.user.id})")

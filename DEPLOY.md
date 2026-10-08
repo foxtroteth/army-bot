@@ -45,6 +45,10 @@ tail -f ~/army-bot/logs/stdout.log ~/army-bot/logs/stderr.log
 
 `stdout.log` has the bot's own prints (for example `Logged in as ...`). `stderr.log` has discord.py's logging and any tracebacks. The logs are not rotated; truncate them with `: > ~/army-bot/logs/stderr.log` if they get large.
 
+## Giveaway data
+
+Wallets and feedback are stored in `~/army-bot/data/armybot.db` (gitignored, never pushed). Export it from Discord with `/giveaway-export`. To back it up, copy the file: `cp ~/army-bot/data/armybot.db ~/armybot-backup-$(date +%F).db`. To start a fresh giveaway later, stop the bot, move that file away, then start the bot again.
+
 ## Stop, start, restart
 
 ```bash

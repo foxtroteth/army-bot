@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this bot does
 
-ArmyBot is a Discord bot with a single slash command (`/channel-list`) that lists all text channels a given role can access, grouped by category, with emoji indicators for view-only vs view & send permissions.
+ArmyBot is a Discord bot for the LP Army server. `/channel-list` lists all text channels a given role can access, grouped by category, with emoji indicators for view-only vs view & send permissions. The giveaway feature (`giveaway.py`) collects Solana wallets from eligible role holders for a gacha card giveaway, then collects feedback from the recipients.
 
 ## Running the bot
 
@@ -26,12 +26,24 @@ Slash commands sync automatically on startup via `bot.tree.sync()` in `on_ready`
 
 ## Architecture
 
-Everything lives in `bot.py`. The command flow is:
+`/channel-list` lives in `bot.py`. The command flow is:
 
 1. **`channel_list`** — the slash command handler. Defers the response immediately (required for commands that may take time), then calls helpers and sends output as one or more followup messages.
 2. **`get_channel_lines`** — collects all text channels the role can view, groups them by category (sorted by position), skips separator categories, and returns a flat list of formatted strings ready to concatenate.
 3. **`chunk_messages`** — splits the body lines into chunks under 1500 characters and prepends the header to the first chunk. The 1500-char limit (below Discord's 2000-char cap) is intentional — Discord followup ephemeral messages fail to render channel mentions (`<#id>`) when content is too large.
 4. **`is_separator`** — filters out decorative Discord category names (e.g. `➖➖➖➖`) that contain no alphanumeric characters.
+
+## Giveaway (`giveaway.py`)
+
+Loaded as an extension from `setup_hook` in `bot.py`. All `/giveaway-*` commands are admin-only (`default_permissions(manage_guild=True)`), so regular members never see them. Members interact only through panel buttons that admins post into role-locked channels.
+
+- **Flow:** `/giveaway-start` (pick the gacha role, up to 8 eligible roles, cap default 500) posts the wallet panel in the current channel. `/giveaway-feedback` closes the wallet panel and posts a feedback panel in the channel it is run in. `/giveaway-close` removes the panel button. `/giveaway-stats` and `/giveaway-export` (CSV) read the data.
+- **Storage:** `GiveawayStore` wraps SQLite at `data/armybot.db` (gitignored). One row per Discord user holds their wallet and feedback, so the CSV export is "the sheet". Settings (phase, roles, cap, panel message location) live in the `settings` table, not `.env`.
+- **Rules:** wallets must decode as 32-byte base58 (Solana). One wallet per user (resubmitting replaces it without using a slot). A wallet can't belong to two users. The cap counts users with a wallet. Feedback requires the gacha role.
+- **Persistent buttons:** `WalletView`/`FeedbackView` use `timeout=None` and fixed `custom_id`s (`giveaway:wallet`, `giveaway:feedback`) and are registered in `cog_load`. Do not change those IDs or panels already posted stop working.
+- **Cap race safety:** `submit_wallet` does the count check and insert with no `await` in between, so concurrent submissions can't exceed the cap. Keep it synchronous.
+- **Role grant:** the bot needs Manage Roles and its top role must be above the gacha role. `/giveaway-start` checks this. A failed role grant still keeps the wallet and tells the member a mod will add the role.
+- CSV cells from user input go through `csv_safe` to block spreadsheet formula injection.
 
 ## Key constraints to keep in mind
 
