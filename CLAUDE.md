@@ -43,7 +43,7 @@ Loaded as an extension from `setup_hook` in `bot.py`. All `/giveaway-*` commands
 - **Rules:** wallets must decode as 32-byte base58 (Solana). One wallet per user (resubmitting replaces it without using a slot). A wallet can't belong to two users. The cap counts users with a wallet. Feedback requires a role from the feedback list.
 - **Persistent buttons:** `WalletView`/`FeedbackView` use `timeout=None` and fixed `custom_id`s (`giveaway:wallet`, `giveaway:mywallet`, `giveaway:feedback`) and are registered in `cog_load`. Do not change those IDs or panels already posted stop working.
 - **Cap race safety:** `submit_wallet` does the count check and insert with no `await` in between, so concurrent submissions can't exceed the cap. Keep it synchronous.
-- **Role grant:** the bot needs Manage Roles and its top role must be above the gacha role. `/giveaway-start` checks this. A failed role grant still keeps the wallet and tells the member a mod will add the role.
+- **Role grant:** the bot needs Manage Roles and its top role must be above the gacha role. `/giveaway-start` checks this, and `gacha_role_problem` also refuses a gacha role the invoker could not assign by hand (needs Manage Roles and a higher role, or server owner) or one carrying moderation permissions, since every submitter receives it. A failed role grant still keeps the wallet and tells the member a mod will add the role.
 - CSV cells from user input go through `csv_safe` to block spreadsheet formula injection.
 
 ## Key constraints to keep in mind
