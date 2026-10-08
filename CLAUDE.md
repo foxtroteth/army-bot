@@ -55,8 +55,8 @@ Loaded as an extension from `setup_hook` in `bot.py`. All `/giveaway-*` commands
 
 ## Deployment
 
-Runs 24/7 on a Mac mini as a launchd LaunchAgent labelled `com.apex.army-bot`, checked out at `~/army-bot` with a virtualenv in `.venv`. The template lives in `deploy/com.apex.army-bot.plist` (`__HOME__` is substituted at install time). launchd starts it at login, restarts it on crash, and writes output to `~/army-bot/logs/stdout.log` and `stderr.log`. `DISCORD_TOKEN` lives in `~/army-bot/.env` on the Mac mini and is never committed (`.env`, `logs/` and `.venv/` are gitignored).
+Runs 24/7 on a Mac mini as a launchd LaunchAgent labelled `com.apex.army-bot`, checked out at `~/Projects/army-bot` with a virtualenv in `.venv`. The template lives in `deploy/com.apex.army-bot.plist` (`__HOME__` is substituted at install time). launchd starts it at login, restarts it on crash, and writes output to `~/Projects/army-bot/logs/stdout.log` and `stderr.log`. `DISCORD_TOKEN` lives in `~/Projects/army-bot/.env` on the Mac mini and is never committed (`.env`, `logs/` and `.venv/` are gitignored).
 
-Pushing to `main` does **not** auto-deploy. To ship: `cd ~/army-bot && git pull && launchctl kickstart -k gui/$(id -u)/com.apex.army-bot`. See `DEPLOY.md` for full setup, logs, and stop/restart commands.
+Pushing to `main` does **not** auto-deploy. To ship: `cd ~/Projects/army-bot && git pull && launchctl kickstart -k gui/$(id -u)/com.apex.army-bot`. See `DEPLOY.md` for full setup, logs, and stop/restart commands.
 
 Output is unbuffered (`PYTHONUNBUFFERED=1` in the plist) so `print` calls reach the log file immediately. Keep that if you change how the bot is launched.

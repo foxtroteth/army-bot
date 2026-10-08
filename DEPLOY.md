@@ -1,13 +1,15 @@
 # Deploying ArmyBot on the Mac mini
 
-ArmyBot runs 24/7 on the Mac mini as a launchd LaunchAgent (`com.apex.army-bot`), the same way the other bots on that machine are managed. launchd starts it at login, restarts it if it crashes (30s throttle), and writes its output to `~/army-bot/logs/`.
+ArmyBot runs 24/7 on the Mac mini as a launchd LaunchAgent (`com.apex.army-bot`), the same way the other bots on that machine are managed. launchd starts it at login, restarts it if it crashes (30s throttle), and writes its output to `~/Projects/army-bot/logs/`.
 
 ## Setup from scratch
 
+The bot lives in `~/Projects/army-bot`. On the Mac mini, `~/army-bot` is a symlink to it, kept for old notes and scripts.
+
 ```bash
 # 1. Clone and create the virtualenv
-git clone https://github.com/foxtroteth/army-bot.git ~/army-bot
-cd ~/army-bot
+git clone https://github.com/foxtroteth/army-bot.git ~/Projects/army-bot
+cd ~/Projects/army-bot
 python3.12 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 mkdir -p logs
@@ -32,7 +34,7 @@ The Mac must be set to never sleep and to restart after a power failure (System 
 ## Updating after a push to main
 
 ```bash
-cd ~/army-bot && git pull
+cd ~/Projects/army-bot && git pull
 launchctl kickstart -k gui/$(id -u)/com.apex.army-bot
 ```
 
@@ -42,14 +44,14 @@ If `requirements.txt` changed, run `.venv/bin/pip install -r requirements.txt` b
 
 ```bash
 launchctl print gui/$(id -u)/com.apex.army-bot | grep -E 'state|pid|last exit'
-tail -f ~/army-bot/logs/stdout.log ~/army-bot/logs/stderr.log
+tail -f ~/Projects/army-bot/logs/stdout.log ~/Projects/army-bot/logs/stderr.log
 ```
 
-`stdout.log` has the bot's own prints (for example `Logged in as ...`). `stderr.log` has discord.py's logging and any tracebacks. The logs are not rotated; truncate them with `: > ~/army-bot/logs/stderr.log` if they get large.
+`stdout.log` has the bot's own prints (for example `Logged in as ...`). `stderr.log` has discord.py's logging and any tracebacks. The logs are not rotated; truncate them with `: > ~/Projects/army-bot/logs/stderr.log` if they get large.
 
 ## Giveaway data
 
-Wallets and feedback are stored in `~/army-bot/data/armybot.db` (gitignored, never pushed). Export it from Discord with `/giveaway-export`. To back it up, copy the file: `cp ~/army-bot/data/armybot.db ~/armybot-backup-$(date +%F).db`. To start a fresh giveaway later, stop the bot, move that file away, then start the bot again.
+Wallets and feedback are stored in `~/Projects/army-bot/data/armybot.db` (gitignored, never pushed). Export it from Discord with `/giveaway-export`. To back it up, copy the file: `cp ~/Projects/army-bot/data/armybot.db ~/armybot-backup-$(date +%F).db`. To start a fresh giveaway later, stop the bot, move that file away, then start the bot again.
 
 ## Stop, start, restart
 

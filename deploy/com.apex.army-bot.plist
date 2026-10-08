@@ -3,7 +3,7 @@
 <!--
   launchd LaunchAgent template for ArmyBot.
   __HOME__ is replaced with your home directory at install time (see DEPLOY.md).
-  No secrets here: DISCORD_TOKEN is read from ~/army-bot/.env by bot.py.
+  No secrets here: DISCORD_TOKEN is read from ~/Projects/army-bot/.env by bot.py.
 -->
 <plist version="1.0">
 <dict>
@@ -11,11 +11,11 @@
 	<string>com.apex.army-bot</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>__HOME__/army-bot/.venv/bin/python</string>
+		<string>__HOME__/Projects/army-bot/.venv/bin/python</string>
 		<string>bot.py</string>
 	</array>
 	<key>WorkingDirectory</key>
-	<string>__HOME__/army-bot</string>
+	<string>__HOME__/Projects/army-bot</string>
 	<key>EnvironmentVariables</key>
 	<dict>
 		<key>PATH</key>
@@ -30,8 +30,8 @@
 	<key>ThrottleInterval</key>
 	<integer>30</integer>
 	<key>StandardOutPath</key>
-	<string>__HOME__/army-bot/logs/stdout.log</string>
+	<string>__HOME__/Projects/army-bot/logs/stdout.log</string>
 	<key>StandardErrorPath</key>
-	<string>__HOME__/army-bot/logs/stderr.log</string>
+	<string>__HOME__/Projects/army-bot/logs/stderr.log</string>
 </dict>
 </plist>
