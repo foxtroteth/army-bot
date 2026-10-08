@@ -21,6 +21,7 @@ from discord.ext import commands
 from discord.http import Route
 
 DB_PATH = Path(__file__).parent / "data" / "armybot.db"
+EXPORT_DIR = Path(__file__).parent / "data" / "exports"
 DEFAULT_CAP = 500
 FORMS = ("wallet", "feedback")
 Form = Literal["wallet", "feedback"]
@@ -804,16 +805,38 @@ class Giveaway(commands.Cog):
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
-    @admin_command(name="giveaway-export", description="Download all wallets and feedback as a CSV")
+    @admin_command(name="giveaway-export", description="DM yourself all wallets and feedback as a CSV")
     async def giveaway_export(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
         data = self.store.export_csv().encode("utf-8-sig")  # BOM so Excel reads emoji correctly
-        name = f"giveaway-{datetime.now(timezone.utc):%Y%m%d-%H%M}.csv"
-        await interaction.response.send_message(
-            f"{self.store.wallet_count()} wallets.",
-            file=discord.File(io.BytesIO(data), filename=name),
-            ephemeral=True,
-        )
+        name = f"giveaway-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}.csv"
 
+        # Keep a copy on the Mac too
+        EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+        (EXPORT_DIR / name).write_bytes(data)
+
+        s = self.store.stats()
+        summary = f"**{s['wallets']}** wallets, **{s['feedback']}** feedback responses."
+        # A DM keeps the file for good and shows it as a normal download on mobile.
+        # Ephemeral replies disappear when Discord reloads, so they are only the fallback.
+        try:
+            await interaction.user.send(
+                f"📦 Giveaway export from **{interaction.guild.name}**. {summary}",
+                file=discord.File(io.BytesIO(data), filename=name),
+            )
+            await interaction.followup.send(
+                f"📬 Sent the export to your DMs. {summary}\nCopy saved on the Mac: `data/exports/{name}`",
+                ephemeral=True,
+            )
+        except discord.HTTPException:
+            # DMs closed (Forbidden) or failed: hand the file over here instead
+            await interaction.followup.send(
+                f"Couldn't DM you (are your DMs open for this server?), so here it is. {summary}\n"
+                f"Download it now: this message disappears when Discord reloads. "
+                f"Copy saved on the Mac: `data/exports/{name}`",
+                file=discord.File(io.BytesIO(data), filename=name),
+                ephemeral=True,
+            )
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Giveaway(bot, GiveawayStore()))
