@@ -428,6 +428,49 @@ class RoleEditorView(discord.ui.View):
                 pass
 
 
+def can_export(perms: discord.Permissions) -> bool:
+    return perms.administrator or perms.manage_guild
+
+
+def export_outsiders(channel: discord.abc.GuildChannel) -> list[str]:
+    """Who can read this channel but couldn't run /giveaway-export themselves.
+
+    The export lists every wallet, so it may only be posted where all readers are admins
+    already. Bot/integration roles are ignored. Returns mentions/labels; empty means safe.
+    """
+    outsiders = []
+    for role in channel.guild.roles:
+        if role.managed or can_export(role.permissions):
+            continue
+        if channel.permissions_for(role).view_channel:
+            outsiders.append("@everyone" if role.is_default() else role.mention)
+    for target, overwrite in channel.overwrites.items():
+        if isinstance(target, discord.Role) or not overwrite.view_channel:
+            continue
+        # Member-specific access: only fine if we can see that member is an admin
+        if not (isinstance(target, discord.Member) and (target.bot or can_export(target.guild_permissions))):
+            outsiders.append(f"<@{target.id}>")
+    return outsiders
+
+
+class PostExportView(discord.ui.View):
+    """Lets the admin knowingly post an export in a channel some non-admins can read."""
+
+    def __init__(self, data: bytes, name: str, summary: str):
+        super().__init__(timeout=600)
+        self.data, self.name, self.summary = data, name, summary
+
+    @discord.ui.button(label="Post here anyway", emoji="📦", style=discord.ButtonStyle.danger)
+    async def post(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.stop()
+        await interaction.response.edit_message(view=None)
+        await interaction.followup.send(
+            f"📦 Giveaway export by {interaction.user.mention}. {self.summary}",
+            file=discord.File(io.BytesIO(self.data), filename=self.name),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+
 def admin_command(**kwargs):
     # Only visible to members with Manage Server by default (adjustable in Server Settings > Integrations)
     def wrap(func):
@@ -819,13 +862,17 @@ class Giveaway(commands.Cog):
         # Posted as a normal message so it stays in the channel and opens on mobile (ephemeral
         # messages vanish on reload and iOS can't preview CSVs in them). The file lists every
         # wallet, so never post it where @everyone can read.
-        if interaction.channel.permissions_for(interaction.guild.default_role).view_channel:
+        outsiders = export_outsiders(interaction.channel)
+        if outsiders:
             await interaction.response.send_message(
-                f"⚠️ This channel is visible to everyone, so I'm only showing the export to you. "
-                f"Run it in a private mod channel to post it there. Download it now: this message "
-                f"disappears when Discord reloads.\n{summary}",
+                f"⚠️ Non-admins can read this channel: {', '.join(outsiders[:10])}"
+                f"{' and more' if len(outsiders) > 10 else ''}. Here's the export privately; download it now, "
+                f"this message disappears when Discord reloads. If it's fine for them to see every wallet, "
+                f"press **Post here anyway**.\n{summary}",
                 file=discord.File(io.BytesIO(data), filename=name),
+                view=PostExportView(data, name, summary),
                 ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
             )
             return
         await interaction.response.send_message(
