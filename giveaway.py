@@ -326,40 +326,105 @@ def gacha_role_problem(invoker: discord.Member, role: discord.Role) -> str | Non
     return None
 
 
-class RolePickView(discord.ui.View):
-    """Ephemeral multi-select for adding or removing several eligible roles at once."""
+class RoleEditorView(discord.ui.View):
+    """Ephemeral editor listing every server role across several dropdowns.
 
-    def __init__(self, cog: "Giveaway", guild: discord.Guild, form: str, action: str):
-        super().__init__(timeout=300)
-        self.cog, self.form, self.action = cog, form, action
-        current = cog.store.role_ids(form)
-        if action == "remove" and len(current) <= 25:
-            # Removing: list only the roles currently on the form
-            options = [discord.SelectOption(label=(guild.get_role(i).name if guild.get_role(i) else str(i))[:100],
-                                            value=str(i)) for i in current]
-            self.picker = discord.ui.Select(placeholder="Roles to remove", min_values=1,
-                                            max_values=len(options), options=options)
-        else:
-            self.picker = discord.ui.RoleSelect(
-                placeholder="Roles to add" if action == "add" else "Roles to remove",
-                min_values=1, max_values=25,
+    Discord's built-in role picker only preloads a few dozen roles and relies on search,
+    so this lists them all: 25 per dropdown, 4 dropdowns per page (row 5 holds the
+    buttons), with pages when a server has more than 100 roles. Roles already on the
+    form start ticked; Save writes the ticked set back.
+    """
+
+    PER_MENU, MENUS_PER_PAGE = 25, 4
+
+    def __init__(self, cog: "Giveaway", guild: discord.Guild, form: str, counts: dict[int, int]):
+        super().__init__(timeout=600)
+        self.cog, self.form, self.counts = cog, form, counts
+        # Skip @everyone and bot/integration roles; nobody "joins" those
+        self.roles = sorted((r for r in guild.roles if not r.is_default() and not r.managed),
+                            key=lambda r: r.name.lower())
+        self.selected = set(cog.store.role_ids(form))
+        self.page = 0
+        self.message: discord.WebhookMessage | None = None
+        self.render()
+
+    @property
+    def page_size(self) -> int:
+        return self.PER_MENU * self.MENUS_PER_PAGE
+
+    @property
+    def pages(self) -> int:
+        return max(1, -(-len(self.roles) // self.page_size))
+
+    def render(self):
+        self.clear_items()
+        start = self.page * self.page_size
+        page_roles = self.roles[start:start + self.page_size]
+        for row, i in enumerate(range(0, len(page_roles), self.PER_MENU)):
+            chunk = page_roles[i:i + self.PER_MENU]
+            menu = discord.ui.Select(
+                placeholder=f"{chunk[0].name[:40]} … {chunk[-1].name[:40]}",
+                min_values=0, max_values=len(chunk), row=row,
+                options=[discord.SelectOption(
+                    label=r.name[:100], value=str(r.id), default=r.id in self.selected,
+                    description=f"{self.counts.get(r.id, '?')} members",
+                ) for r in chunk],
             )
-        self.picker.callback = self.on_pick
-        self.add_item(self.picker)
+            menu.callback = self.make_menu_callback(menu, {r.id for r in chunk})
+            self.add_item(menu)
 
-    async def on_pick(self, interaction: discord.Interaction):
-        if isinstance(self.picker, discord.ui.RoleSelect):
-            ids = [r.id for r in self.picker.values]
-        else:
-            ids = [int(v) for v in self.picker.values]
+        if self.pages > 1:
+            prev = discord.ui.Button(label="◀", style=discord.ButtonStyle.secondary, row=4,
+                                     disabled=self.page == 0)
+            nxt = discord.ui.Button(label=f"▶ ({self.page + 1}/{self.pages})", style=discord.ButtonStyle.secondary,
+                                    row=4, disabled=self.page >= self.pages - 1)
+            prev.callback, nxt.callback = self.make_page_callback(-1), self.make_page_callback(1)
+            self.add_item(prev)
+            self.add_item(nxt)
+        save = discord.ui.Button(label="Save", emoji="💾", style=discord.ButtonStyle.success, row=4)
+        cancel = discord.ui.Button(label="Cancel", style=discord.ButtonStyle.danger, row=4)
+        save.callback, cancel.callback = self.on_save, self.on_cancel
+        self.add_item(save)
+        self.add_item(cancel)
+
+    def make_menu_callback(self, menu: discord.ui.Select, chunk_ids: set[int]):
+        async def callback(interaction: discord.Interaction):
+            # Each dropdown owns its slice of roles: replace that slice with what's ticked now
+            self.selected -= chunk_ids
+            self.selected |= {int(v) for v in menu.values}
+            for option in menu.options:
+                option.default = int(option.value) in self.selected
+            await interaction.response.defer()
+        return callback
+
+    def make_page_callback(self, step: int):
+        async def callback(interaction: discord.Interaction):
+            self.page = min(max(self.page + step, 0), self.pages - 1)
+            self.render()
+            await interaction.response.edit_message(view=self)
+        return callback
+
+    async def on_save(self, interaction: discord.Interaction):
         self.stop()
         await interaction.response.defer()
-        note = self.cog.apply_role_change(self.form, self.action, ids)
+        note = self.cog.replace_roles(self.form, self.selected)
         await self.cog.after_role_change(self.form)
         await interaction.edit_original_response(
             content=note, embed=await self.cog.role_summary(interaction.guild, self.form), view=None,
             allowed_mentions=discord.AllowedMentions.none(),
         )
+
+    async def on_cancel(self, interaction: discord.Interaction):
+        self.stop()
+        await interaction.response.edit_message(content="Cancelled, nothing changed.", embed=None, view=None)
+
+    async def on_timeout(self):
+        if self.message:
+            try:
+                await self.message.edit(content="⏱️ Role editor expired, nothing saved. Run the command again.",
+                                        embed=None, view=None)
+            except discord.HTTPException:
+                pass
 
 
 def admin_command(**kwargs):
@@ -598,15 +663,15 @@ class Giveaway(commands.Cog):
         )
 
     @admin_command(name="giveaway-role-add",
-                   description="Allow roles to use the wallet or feedback form (leave role empty to pick several)")
-    @app_commands.describe(form="Which form", role="One role to allow; leave empty to pick several from a list")
+                   description="Allow a role on the wallet or feedback form (leave role empty to edit the full list)")
+    @app_commands.describe(form="Which form", role="One role to allow; leave empty to open the full role list")
     async def giveaway_role_add(self, interaction: discord.Interaction, form: Form,
                                 role: discord.Role | None = None):
         await self.edit_roles(interaction, form, "add", role)
 
     @admin_command(name="giveaway-role-remove",
-                   description="Stop roles from using the wallet or feedback form (leave role empty to pick several)")
-    @app_commands.describe(form="Which form", role="One role to remove; leave empty to pick several from a list")
+                   description="Remove a role from the wallet or feedback form (leave role empty to edit the full list)")
+    @app_commands.describe(form="Which form", role="One role to remove; leave empty to open the full role list")
     async def giveaway_role_remove(self, interaction: discord.Interaction, form: Form,
                                    role: discord.Role | None = None):
         await self.edit_roles(interaction, form, "remove", role)
@@ -623,16 +688,31 @@ class Giveaway(commands.Cog):
                 allowed_mentions=discord.AllowedMentions.none(),
             )
             return
-        if action == "remove" and not self.store.role_ids(form):
-            await interaction.followup.send(f"The {form} form has no roles to remove.", ephemeral=True)
-            return
-        verb = "add to" if action == "add" else "remove from"
-        await interaction.followup.send(
-            f"Pick the roles to **{verb}** the **{form}** form (up to 25 at once; run the command again for more).",
-            embed=await self.role_summary(interaction.guild, form),
-            view=RolePickView(self, interaction.guild, form, action),
-            ephemeral=True,
+        view = RoleEditorView(self, interaction.guild, form, await self.role_counts(interaction.guild))
+        pages = f" Use ◀ ▶ to see all {len(view.roles)} roles." if view.pages > 1 else ""
+        view.message = await interaction.followup.send(
+            f"**Edit the {form} form roles.** Every role is listed A to Z; ticked roles are on the form. "
+            f"Tick to add, untick to remove, then press **Save**.{pages}",
+            view=view, ephemeral=True, wait=True,
         )
+
+    def replace_roles(self, form: str, new_ids: set[int]) -> str:
+        """Sets a form's roles to exactly new_ids (keeping existing order) and describes the change."""
+        current = self.store.role_ids(form)
+        added = [i for i in new_ids if i not in current]
+        removed = [i for i in current if i not in new_ids]
+        self.store.set_role_ids(form, [i for i in current if i in new_ids] + sorted(added))
+        mentions = lambda ids: ", ".join(f"<@&{i}>" for i in ids)
+        parts = []
+        if added:
+            parts.append(f"Added {mentions(added)}.")
+        if removed:
+            parts.append(f"Removed {mentions(removed)}.")
+        if not parts:
+            parts.append("Nothing changed.")
+        if not new_ids:
+            parts.append("⚠️ No roles left, so nobody can use this form now.")
+        return " ".join(parts)
 
     def apply_role_change(self, form: str, action: str, role_ids: list[int]) -> str:
         """Adds or removes roles from a form's list and returns a note describing what changed."""
