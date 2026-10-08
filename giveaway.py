@@ -495,6 +495,16 @@ class Giveaway(commands.Cog):
             embed.add_field(name="Total members", value=f"**{max(per_role)} to {sum(per_role)}**")
             embed.set_footer(text="Range because members with several roles can't be de-duplicated "
                                   "without the Server Members intent.")
+
+        # The reward role, shown alongside every form's role list
+        gacha_id = self.store.gacha_role_id
+        if not gacha_id:
+            gacha = "_Not set yet. Run /giveaway-start._"
+        elif guild.get_role(gacha_id) is None:
+            gacha = "⚠️ The gacha role was deleted. Run /giveaway-start again with a new one."
+        else:
+            gacha = f"<@&{gacha_id}>: **{counts.get(gacha_id, '?')}** members (given to everyone who submits a wallet)"
+        embed.add_field(name="🎴 Gacha role", value=gacha, inline=False)
         return embed
 
     def current_view(self) -> discord.ui.View | None:
