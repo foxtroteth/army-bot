@@ -202,7 +202,7 @@ def panel_embed(store: GiveawayStore) -> discord.Embed:
             description=(
                 "Click **Submit wallet** and paste your **Solana wallet address**.\n"
                 "Open to LP Army and activity role holders. One wallet per person, "
-                "you can resubmit to fix a typo. Click **My wallet** to see what you submitted.\n\n"
+                "you can resubmit to fix a typo. Click **Check Wallet** to see what you submitted.\n\n"
                 + ("**All spots are taken.**" if full else f"**{count} / {cap}** spots claimed")
             ),
             color=discord.Color.red() if full else discord.Color.gold(),
@@ -267,7 +267,7 @@ class WalletView(discord.ui.View):
     async def submit(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.handle_wallet_button(interaction)
 
-    @discord.ui.button(label="My wallet", emoji="🔍", style=discord.ButtonStyle.secondary,
+    @discord.ui.button(label="Check Wallet", emoji="🔍", style=discord.ButtonStyle.secondary,
                        custom_id="giveaway:mywallet")
     async def check(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.handle_check_wallet(interaction)
