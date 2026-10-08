@@ -18,6 +18,7 @@ from typing import Literal
 import discord
 from discord import app_commands
 from discord.ext import commands
+from discord.http import Route
 
 DB_PATH = Path(__file__).parent / "data" / "armybot.db"
 DEFAULT_CAP = 500
@@ -324,32 +325,49 @@ class Giveaway(commands.Cog):
         allowed = set(self.store.role_ids(form))
         return [r for r in member.roles if r.id in allowed]
 
-    def role_summary(self, guild: discord.Guild, form: str) -> discord.Embed:
+    async def role_counts(self, guild: discord.Guild) -> dict[int, int]:
+        # Works without the privileged members intent (unlike role.members)
+        try:
+            data = await self.bot.http.request(
+                Route("GET", "/guilds/{guild_id}/roles/member-counts", guild_id=guild.id)
+            )
+            return {int(k): v for k, v in data.items()}
+        except discord.HTTPException as e:
+            print(f"[giveaway] could not fetch role member counts: {e}")
+            return {}
+
+    async def role_summary(self, guild: discord.Guild, form: str) -> discord.Embed:
         # Roles deleted from the server can't be picked in /giveaway-role-remove, so drop them here
         ids = self.store.role_ids(form)
         live = [i for i in ids if guild.get_role(i)]
         if len(live) != len(ids):
             self.store.set_role_ids(form, live)
-        lines, unique = [], set()
-        for role_id in live:
-            role = guild.get_role(role_id)
-            unique.update(m.id for m in role.members)
-            lines.append(f"- {role.mention}: **{len(role.members)}** members")
+        counts = await self.role_counts(guild)
+        lines = [f"- <@&{i}>: **{counts.get(i, '?')}** members" for i in live]
         body = "\n".join(lines) or "_No roles yet. Add one with /giveaway-role-add._"
         if len(live) != len(ids):
             body += f"\n\n_Removed {len(ids) - len(live)} role(s) that were deleted from the server._"
-        ids = live
         if len(body) > 3800:  # embed description limit is 4096
             body = body[:3800].rsplit("\n", 1)[0] + "\n- ..."
+
         embed = discord.Embed(
             title=f"{'💳 Wallet' if form == 'wallet' else '📝 Feedback'} form: eligible roles",
             description=body,
             color=discord.Color.gold() if form == "wallet" else discord.Color.blurple(),
         )
-        embed.add_field(name="Roles", value=str(len(ids)))
-        embed.add_field(name="Unique members", value=f"**{len(unique)}**")
-        if not guild.chunked:
-            embed.set_footer(text="Member list still loading; counts may be low. Try again in a minute.")
+        embed.add_field(name="Roles", value=str(len(live)))
+        per_role = [counts.get(i, 0) for i in live]
+        if self.bot.intents.members and guild.chunked:
+            # Exact: union of members across roles, each person counted once
+            unique = {m.id for i in live for m in guild.get_role(i).members}
+            embed.add_field(name="Unique members", value=f"**{len(unique)}**")
+        elif len(live) <= 1:
+            embed.add_field(name="Total members", value=f"**{sum(per_role)}**")
+        else:
+            # Without the members intent we only have per-role counts, so overlap is unknown
+            embed.add_field(name="Total members", value=f"**{max(per_role)} to {sum(per_role)}**")
+            embed.set_footer(text="Range because members with several roles can't be de-duplicated "
+                                  "without the Server Members intent.")
         return embed
 
     def current_view(self) -> discord.ui.View | None:
@@ -508,7 +526,7 @@ class Giveaway(commands.Cog):
         await interaction.followup.send(
             f"Giveaway open. Gacha role: {gacha_role.mention}. Cap: {cap}. "
             "Add or remove eligible roles any time with /giveaway-role-add and /giveaway-role-remove.",
-            embed=self.role_summary(interaction.guild, "wallet"),
+            embed=await self.role_summary(interaction.guild, "wallet"),
             ephemeral=True,
         )
 
@@ -534,16 +552,19 @@ class Giveaway(commands.Cog):
     @app_commands.describe(form="Which form (default: both)")
     async def giveaway_roles(self, interaction: discord.Interaction, form: Form | None = None):
         forms = [form] if form else list(FORMS)
-        await interaction.response.send_message(
-            embeds=[self.role_summary(interaction.guild, f) for f in forms], ephemeral=True,
+        await interaction.response.defer(ephemeral=True)
+        await interaction.followup.send(
+            embeds=[await self.role_summary(interaction.guild, f) for f in forms], ephemeral=True,
         )
 
     async def after_role_change(self, interaction: discord.Interaction, form: str, note: str):
         # The live panel lists the eligible roles, so redraw it if it's showing this form
+        # Defer first: the panel edit and count lookup can take longer than Discord's 3s reply window
+        await interaction.response.defer(ephemeral=True)
         if self.store.phase == form:
             await self.refresh_panel()
-        await interaction.response.send_message(
-            note, embed=self.role_summary(interaction.guild, form), ephemeral=True,
+        await interaction.followup.send(
+            note, embed=await self.role_summary(interaction.guild, form), ephemeral=True,
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
@@ -566,7 +587,7 @@ class Giveaway(commands.Cog):
         await interaction.followup.send(
             "Feedback open, wallet submissions closed. Make sure these roles can see this channel. "
             "Change them with /giveaway-role-add and /giveaway-role-remove (form: feedback).",
-            embed=self.role_summary(interaction.guild, "feedback"),
+            embed=await self.role_summary(interaction.guild, "feedback"),
             ephemeral=True,
         )
 

@@ -25,7 +25,7 @@ sed "s|__HOME__|$HOME|g" deploy/com.apex.army-bot.plist > ~/Library/LaunchAgents
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.apex.army-bot.plist
 ```
 
-In the Discord Developer Portal (your app > Bot), **Server Members Intent** must be on. Without it the bot can't log in.
+Optional: if Discord approves the **Server Members Intent** for the app, add `MEMBERS_INTENT=1` to `.env` and restart to get exact unique-member totals in `/giveaway-roles`. Never set it before the intent is enabled, or the bot can't log in.
 
 The Mac must be set to never sleep and to restart after a power failure (System Settings > Energy, or `sudo pmset -a sleep 0 autorestart 1`). LaunchAgents only start once the user is logged in, so for the bot to come back after a power cut with nobody at the keyboard, automatic login must be enabled (System Settings > Users & Groups > Automatically log in as). macOS refuses automatic login while FileVault is on, and a FileVault Mac waits at the unlock screen after a power loss, so unattended recovery needs FileVault off. For planned reboots with FileVault on, `sudo fdesetup authrestart` reboots without stopping at the unlock screen.
 
