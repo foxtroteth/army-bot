@@ -202,7 +202,7 @@ def panel_embed(store: GiveawayStore) -> discord.Embed:
             description=(
                 "Click **Submit wallet** and paste your **Solana wallet address**.\n"
                 "Open to LP Army and activity role holders. One wallet per person, "
-                "you can resubmit to fix a typo.\n\n"
+                "you can resubmit to fix a typo. Click **My wallet** to see what you submitted.\n\n"
                 + ("**All spots are taken.**" if full else f"**{count} / {cap}** spots claimed")
             ),
             color=discord.Color.red() if full else discord.Color.gold(),
@@ -266,6 +266,11 @@ class WalletView(discord.ui.View):
                        custom_id="giveaway:wallet")
     async def submit(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.handle_wallet_button(interaction)
+
+    @discord.ui.button(label="My wallet", emoji="🔍", style=discord.ButtonStyle.secondary,
+                       custom_id="giveaway:mywallet")
+    async def check(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.handle_check_wallet(interaction)
 
 
 class FeedbackView(discord.ui.View):
@@ -340,6 +345,18 @@ class Giveaway(commands.Cog):
             await interaction.response.send_message("❌ Sorry, all spots are taken.", ephemeral=True)
             return
         await interaction.response.send_modal(WalletModal(self, current))
+
+    async def handle_check_wallet(self, interaction: discord.Interaction):
+        row = self.store.get_submission(interaction.user.id)
+        if not row or not row["wallet"]:
+            await interaction.response.send_message("You haven't submitted a wallet yet.", ephemeral=True)
+            return
+        changed = (f"\nLast changed <t:{row['updated_at']}:R>."
+                   if row["updated_at"] != row["submitted_at"] else "")
+        await interaction.response.send_message(
+            f"🔍 Your submitted wallet:\n`{row['wallet']}`\nSubmitted <t:{row['submitted_at']}:f>.{changed}",
+            ephemeral=True,
+        )
 
     async def handle_wallet_submit(self, interaction: discord.Interaction, wallet: str):
         member = interaction.user
