@@ -21,6 +21,7 @@ from discord.ext import commands
 from discord.http import Route
 
 DB_PATH = Path(__file__).parent / "data" / "armybot.db"
+EXPORT_DIR = Path(__file__).parent / "data" / "exports"
 DEFAULT_CAP = 500
 FORMS = ("wallet", "feedback")
 Form = Literal["wallet", "feedback"]
@@ -427,6 +428,49 @@ class RoleEditorView(discord.ui.View):
                 pass
 
 
+def can_export(perms: discord.Permissions) -> bool:
+    return perms.administrator or perms.manage_guild
+
+
+def export_outsiders(channel: discord.abc.GuildChannel) -> list[str]:
+    """Who can read this channel but couldn't run /giveaway-export themselves.
+
+    The export lists every wallet, so it may only be posted where all readers are admins
+    already. Bot/integration roles are ignored. Returns mentions/labels; empty means safe.
+    """
+    outsiders = []
+    for role in channel.guild.roles:
+        if role.managed or can_export(role.permissions):
+            continue
+        if channel.permissions_for(role).view_channel:
+            outsiders.append("@everyone" if role.is_default() else role.mention)
+    for target, overwrite in channel.overwrites.items():
+        if isinstance(target, discord.Role) or not overwrite.view_channel:
+            continue
+        # Member-specific access: only fine if we can see that member is an admin
+        if not (isinstance(target, discord.Member) and (target.bot or can_export(target.guild_permissions))):
+            outsiders.append(f"<@{target.id}>")
+    return outsiders
+
+
+class PostExportView(discord.ui.View):
+    """Lets the admin knowingly post an export in a channel some non-admins can read."""
+
+    def __init__(self, data: bytes, name: str, summary: str):
+        super().__init__(timeout=600)
+        self.data, self.name, self.summary = data, name, summary
+
+    @discord.ui.button(label="Post here anyway", emoji="📦", style=discord.ButtonStyle.danger)
+    async def post(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.stop()
+        await interaction.response.edit_message(view=None)
+        await interaction.followup.send(
+            f"📦 Giveaway export by {interaction.user.mention}. {self.summary}",
+            file=discord.File(io.BytesIO(self.data), filename=self.name),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+
 def admin_command(**kwargs):
     # Only visible to members with Manage Server by default (adjustable in Server Settings > Integrations)
     def wrap(func):
@@ -804,16 +848,38 @@ class Giveaway(commands.Cog):
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
-    @admin_command(name="giveaway-export", description="Download all wallets and feedback as a CSV")
+    @admin_command(name="giveaway-export", description="Post all wallets and feedback as a CSV in this channel")
     async def giveaway_export(self, interaction: discord.Interaction):
         data = self.store.export_csv().encode("utf-8-sig")  # BOM so Excel reads emoji correctly
-        name = f"giveaway-{datetime.now(timezone.utc):%Y%m%d-%H%M}.csv"
-        await interaction.response.send_message(
-            f"{self.store.wallet_count()} wallets.",
-            file=discord.File(io.BytesIO(data), filename=name),
-            ephemeral=True,
-        )
+        name = f"giveaway-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}.csv"
 
+        # Keep a copy on the Mac too
+        EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+        (EXPORT_DIR / name).write_bytes(data)
+
+        s = self.store.stats()
+        summary = f"**{s['wallets']}** wallets, **{s['feedback']}** feedback responses. Mac copy: `data/exports/{name}`"
+        # Posted as a normal message so it stays in the channel and opens on mobile (ephemeral
+        # messages vanish on reload and iOS can't preview CSVs in them). The file lists every
+        # wallet, so never post it where @everyone can read.
+        outsiders = export_outsiders(interaction.channel)
+        if outsiders:
+            await interaction.response.send_message(
+                f"⚠️ Non-admins can read this channel: {', '.join(outsiders[:10])}"
+                f"{' and more' if len(outsiders) > 10 else ''}. Here's the export privately; download it now, "
+                f"this message disappears when Discord reloads. If it's fine for them to see every wallet, "
+                f"press **Post here anyway**.\n{summary}",
+                file=discord.File(io.BytesIO(data), filename=name),
+                view=PostExportView(data, name, summary),
+                ephemeral=True,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return
+        await interaction.response.send_message(
+            f"📦 Giveaway export by {interaction.user.mention}. {summary}",
+            file=discord.File(io.BytesIO(data), filename=name),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Giveaway(bot, GiveawayStore()))
