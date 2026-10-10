@@ -4,6 +4,12 @@ There are two wallet giveaways (1 and 2), each with its own eligible roles, cap,
 banner. A member can hold one wallet across both: whoever submitted in one can't submit in the
 other. Giveaway 1 keeps the original setting keys and button IDs; giveaway 2 uses `_2` keys.
 
+Setup and posting are separate: /giveaway-setup only changes settings (and redraws a live
+panel), /giveaway-post posts the panel. Posting again moves the panel: the old one is turned
+into a pointer, so there is only ever one live panel per giveaway.
+
+Phase "off":      never set up.
+Phase "ready":    set up with /giveaway-setup, panel not posted yet.
 Phase "wallet":   members with an eligible role submit a wallet (capped), get the gacha role.
 Phase "feedback": (giveaway 1 slot only) wallet panels close; a feedback panel is posted.
 Phase "closed":   the panel loses its button.
@@ -616,9 +622,9 @@ class Giveaway(commands.Cog):
         # The reward role, shown alongside every form's role list
         gacha_id = self.store.gacha_role_id
         if not gacha_id:
-            gacha = "_Not set yet. Run /giveaway-start._"
+            gacha = "_Not set yet. Run /giveaway-setup with a gacha_role._"
         elif guild.get_role(gacha_id) is None:
-            gacha = "⚠️ The gacha role was deleted. Run /giveaway-start again with a new one."
+            gacha = "⚠️ The gacha role was deleted. Pick a new one with /giveaway-setup gacha_role:."
         else:
             gacha = (f"<@&{gacha_id}>: **{counts.get(gacha_id, '?')}** members "
                      "(given to everyone who submits a wallet in either giveaway)")
@@ -635,7 +641,7 @@ class Giveaway(commands.Cog):
         return None
 
     def panel_content(self, giveaway: int = 1) -> tuple[discord.Embed, list[discord.File]]:
-        """The panel embed plus its banner image file, if one was set with /giveaway-start."""
+        """The panel embed plus its banner image file, if one was set with /giveaway-setup."""
         embed = panel_embed(self.store, giveaway)
         name = self.store.get(key("panel_image", giveaway))
         if name and (IMAGE_DIR / name).is_file():
@@ -798,37 +804,44 @@ class Giveaway(commands.Cog):
 
     # --- admin commands ---
 
-    @admin_command(name="giveaway-start", description="Post a wallet submission panel in this channel")
+    @admin_command(name="giveaway-setup",
+                   description="Create or change a giveaway's settings (doesn't post anything)")
     @app_commands.describe(
+        giveaway="Which giveaway (default 1)",
         gacha_role="Role given to everyone who submits a wallet (shared by both giveaways)",
-        eligible_role="A role allowed to submit (add more with /giveaway-role-add)",
-        cap="Maximum number of wallets (default 500)",
-        image="Optional banner image shown in the panel (PNG, JPG, GIF or WebP, up to 8 MB)",
-        giveaway="Which giveaway this panel is for (default 1)",
+        cap="Maximum number of wallets",
+        image="Banner image shown in the panel (PNG, JPG, GIF or WebP, up to 8 MB)",
+        remove_image="Remove the current banner image",
+        eligible_role="Add one role allowed to submit (use /giveaway-role-add for several)",
     )
-    async def giveaway_start(
+    async def giveaway_setup(
         self,
         interaction: discord.Interaction,
-        gacha_role: discord.Role,
-        eligible_role: discord.Role | None = None,
-        cap: app_commands.Range[int, 1, 10000] = DEFAULT_CAP,
-        image: discord.Attachment | None = None,
         giveaway: GiveawayNo = 1,
+        gacha_role: discord.Role | None = None,
+        cap: app_commands.Range[int, 1, 10000] | None = None,
+        image: discord.Attachment | None = None,
+        remove_image: bool = False,
+        eligible_role: discord.Role | None = None,
     ):
-        me = interaction.guild.me
-        if not me.guild_permissions.manage_roles or gacha_role >= me.top_role:
+        if gacha_role:
+            me = interaction.guild.me
+            if not me.guild_permissions.manage_roles or gacha_role >= me.top_role:
+                await interaction.response.send_message(
+                    f"❌ I can't assign {gacha_role.mention}. Give me **Manage Roles** and drag my role "
+                    f"above {gacha_role.mention} in Server Settings > Roles, then run this again.",
+                    ephemeral=True,
+                )
+                return
+            problem = gacha_role_problem(interaction.user, gacha_role)
+            if problem:
+                await interaction.response.send_message(f"❌ {problem}", ephemeral=True)
+                return
+        elif not self.store.gacha_role_id:
             await interaction.response.send_message(
-                f"❌ I can't assign {gacha_role.mention}. Give me **Manage Roles** and drag my role "
-                f"above {gacha_role.mention} in Server Settings > Roles, then run this again.",
-                ephemeral=True,
+                "❌ Pick a `gacha_role` the first time you set up a giveaway.", ephemeral=True
             )
             return
-
-        problem = gacha_role_problem(interaction.user, gacha_role)
-        if problem:
-            await interaction.response.send_message(f"❌ {problem}", ephemeral=True)
-            return
-
         if image and not ((image.content_type or "").startswith("image/") and image.size <= MAX_IMAGE_BYTES):
             await interaction.response.send_message(
                 "❌ The banner must be an image (PNG, JPG, GIF or WebP) of 8 MB or less.", ephemeral=True
@@ -836,51 +849,107 @@ class Giveaway(commands.Cog):
             return
 
         await interaction.response.defer(ephemeral=True)
-        image_name = None
+        changes = []
+        form = wallet_form(giveaway)
+        if gacha_role and gacha_role.id != self.store.gacha_role_id:
+            old = self.store.gacha_role_id
+            self.store.save(gacha_role_id=gacha_role.id)
+            changes.append(f"gacha role {'<@&%d> → ' % old if old else ''}{gacha_role.mention}"
+                           + (" (for both giveaways)" if old else ""))
+        if cap is not None and cap != self.store.cap(giveaway):
+            count = self.store.wallet_count(giveaway)
+            changes.append(f"cap {self.store.cap(giveaway)} → **{cap}**"
+                           + (f" (already {count} wallets, so it's full; nobody is removed)" if count >= cap else ""))
+            self.store.save(**{key("cap", giveaway): cap})
         if image:
             # Keep our own copy: the upload's CDN link expires, and panel edits re-attach it
             ext = Path(image.filename).suffix.lower() or ".png"
             image_name = f"wallet-panel{'' if giveaway == 1 else '-2'}{ext}"
             IMAGE_DIR.mkdir(parents=True, exist_ok=True)
             await image.save(IMAGE_DIR / image_name)
-
-        old_gacha = self.store.gacha_role_id
-        form = wallet_form(giveaway)
-        self.store.save(**{key("phase", giveaway): "wallet", key("cap", giveaway): cap,
-                           key("panel_image", giveaway): image_name, "gacha_role_id": gacha_role.id})
-        if eligible_role:
+            self.store.save(**{key("panel_image", giveaway): image_name})
+            changes.append("new banner image")
+        elif remove_image and self.store.get(key("panel_image", giveaway)):
+            self.store.save(**{key("panel_image", giveaway): None})
+            changes.append("banner removed")
+        if eligible_role and eligible_role.id not in self.store.role_ids(form):
             self.store.set_role_ids(form, self.store.role_ids(form) + [eligible_role.id])
+            changes.append(f"added eligible role {eligible_role.mention}")
         if not self.store.role_ids("feedback"):
-            self.store.set_role_ids("feedback", [gacha_role.id])
+            self.store.set_role_ids("feedback", [self.store.gacha_role_id])
+        if self.store.phase(giveaway) == "off":
+            self.store.save(**{key("phase", giveaway): "ready"})  # set up, not posted yet
 
-        if not await self.post_panel(interaction, WalletView(self, giveaway), giveaway):
-            return
-        gacha_note = (f"⚠️ The gacha role changed from <@&{old_gacha}> to {gacha_role.mention} for both giveaways. "
-                      if old_gacha and old_gacha != gacha_role.id else "")
+        live = self.store.phase(giveaway) == "wallet"
+        if live and changes:
+            await self.refresh_panel(giveaway)
+        status = (f"Its panel is live in <#{self.store.get(key('panel_channel_id', giveaway))}> and was updated."
+                  if live else f"Not posted yet: run **/giveaway-post giveaway:{giveaway}** in the channel "
+                               "where members should submit.")
         await interaction.followup.send(
-            f"✅ Giveaway {giveaway} panel posted. Gacha role: {gacha_role.mention}. Cap: {cap}. "
-            f"{'Banner image attached. ' if image_name else ''}{gacha_note}"
-            f"Add or remove eligible roles any time with /giveaway-role-add (form: {FORM_LABELS[form]}).",
+            f"⚙️ **Giveaway {giveaway} settings** "
+            + (f"changed: {'; '.join(changes)}. " if changes else "(nothing changed). ")
+            + f"Cap {self.store.cap(giveaway)}, {self.store.wallet_count(giveaway)} wallets so far. {status}",
             embed=await self.role_summary(interaction.guild, form),
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @admin_command(name="giveaway-post",
+                   description="Post a giveaway's Submit wallet panel in this channel and open submissions")
+    @app_commands.describe(giveaway="Which giveaway (default 1)")
+    async def giveaway_post(self, interaction: discord.Interaction, giveaway: GiveawayNo = 1):
+        phase = self.store.phase(giveaway)
+        if phase == "off" or not self.store.gacha_role_id:
+            await interaction.response.send_message(
+                f"❌ Giveaway {giveaway} isn't set up yet. Run **/giveaway-setup giveaway:{giveaway}** first.",
+                ephemeral=True,
+            )
+            return
+        if giveaway == 1 and phase == "feedback":
+            await interaction.response.send_message(
+                "❌ Feedback is open in giveaway 1's panel slot. Close it with /giveaway-close first.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+        old_channel = self.store.get(key("panel_channel_id", giveaway))
+        old_message = self.store.get(key("panel_message_id", giveaway))
+
+        self.store.save(**{key("phase", giveaway): "wallet"})
+        message = await self.post_panel(interaction, WalletView(self, giveaway), giveaway)
+        if not message:
+            self.store.save(**{key("phase", giveaway): phase})  # nothing posted: keep the old state
+            return
+        moved = ""
+        if old_channel and old_message and int(old_message) != message.id:
+            # One live panel per giveaway: the previous one points here and loses its buttons
+            if await self.retire_panel(int(old_channel), int(old_message), message):
+                moved = f" The old panel in <#{old_channel}> now points here."
+        roles = self.store.role_ids(wallet_form(giveaway))
+        await interaction.followup.send(
+            f"✅ Giveaway {giveaway} panel posted, submissions open.{moved}"
+            + ("" if roles else " ⚠️ No eligible roles yet, so nobody can submit: add some with /giveaway-role-add."),
             ephemeral=True,
         )
 
-    @admin_command(name="giveaway-cap", description="Change how many wallets a giveaway accepts")
-    @app_commands.describe(cap="New maximum number of wallets", giveaway="Which giveaway (default 1)")
-    async def giveaway_cap(self, interaction: discord.Interaction,
-                           cap: app_commands.Range[int, 1, 10000], giveaway: GiveawayNo = 1):
-        await interaction.response.defer(ephemeral=True)
-        old, count = self.store.cap(giveaway), self.store.wallet_count(giveaway)
-        self.store.save(**{key("cap", giveaway): cap})
-        if self.store.phase(giveaway) == "wallet":
-            await self.refresh_panel(giveaway)
-        note = f"✅ Giveaway {giveaway} cap changed from **{old}** to **{cap}**. **{count}** wallets so far"
-        if count >= cap:
-            note += (f", so it's full now and new wallets are rejected. Existing wallets are kept "
-                     f"(nobody is removed), and members can still update theirs.")
-        else:
-            note += f", **{cap - count}** spots left."
-        await interaction.followup.send(note, ephemeral=True)
+    async def retire_panel(self, channel_id: int, message_id: int, new_message: discord.Message) -> bool:
+        """Turns an old panel into a pointer to the new one (no buttons, no banner)."""
+        try:
+            channel = self.bot.get_channel(channel_id) or await self.bot.fetch_channel(channel_id)
+            old = await channel.fetch_message(message_id)
+            await old.edit(
+                embed=discord.Embed(
+                    title="🎴 This panel has moved",
+                    description=f"Submit your wallet here instead: {new_message.jump_url}",
+                    color=discord.Color.dark_grey(),
+                ),
+                view=None, attachments=[],
+            )
+            return True
+        except discord.HTTPException as e:
+            print(f"[giveaway] could not retire old panel {message_id}: {e}")  # usually already deleted
+            return False
 
     @admin_command(name="giveaway-role-add",
                    description="Allow a role on the wallet or feedback form (leave role empty to edit the full list)")
@@ -982,7 +1051,7 @@ class Giveaway(commands.Cog):
                    description="Close wallet submissions and post the feedback panel in this channel")
     async def giveaway_feedback(self, interaction: discord.Interaction):
         if not self.store.gacha_role_id:
-            await interaction.response.send_message("Run /giveaway-start first.", ephemeral=True)
+            await interaction.response.send_message("Run /giveaway-setup first.", ephemeral=True)
             return
         if not self.store.role_ids("feedback"):
             self.store.set_role_ids("feedback", [self.store.gacha_role_id])
