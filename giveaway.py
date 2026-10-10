@@ -22,6 +22,8 @@ from discord.http import Route
 
 DB_PATH = Path(__file__).parent / "data" / "armybot.db"
 EXPORT_DIR = Path(__file__).parent / "data" / "exports"
+IMAGE_DIR = Path(__file__).parent / "data" / "panel-images"
+MAX_IMAGE_BYTES = 8 * 1024 * 1024
 DEFAULT_CAP = 500
 FORMS = ("wallet", "feedback")
 Form = Literal["wallet", "feedback"]
@@ -462,13 +464,35 @@ class PostExportView(discord.ui.View):
 
     @discord.ui.button(label="Post here anyway", emoji="📦", style=discord.ButtonStyle.danger)
     async def post(self, interaction: discord.Interaction, button: discord.ui.Button):
+        missing = missing_post_perms(interaction.channel, with_file=True)
+        if missing:
+            await interaction.response.send_message(
+                f"❌ I can't post here. Give me: **{', '.join(missing)}**. Use the file above instead.",
+                ephemeral=True,
+            )
+            return
         self.stop()
         await interaction.response.edit_message(view=None)
-        await interaction.followup.send(
-            f"📦 Giveaway export by {interaction.user.mention}. {self.summary}",
-            file=discord.File(io.BytesIO(self.data), filename=self.name),
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
+        await post_export(interaction, self.data, self.name, self.summary)
+
+
+async def post_export(interaction: discord.Interaction, data: bytes, name: str, summary: str):
+    """Posts the export as the bot's own message (no "X used /command" header above it)."""
+    await interaction.channel.send(
+        f"📦 Giveaway export by {interaction.user.mention}. {summary}",
+        file=discord.File(io.BytesIO(data), filename=name),
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
+def missing_post_perms(channel: discord.abc.GuildChannel, with_file: bool = False) -> list[str]:
+    """Permissions the bot lacks to post a panel/export as its own message in this channel."""
+    perms = channel.permissions_for(channel.guild.me)
+    needed = {"View Channel": perms.view_channel, "Send Messages": perms.send_messages,
+              "Embed Links": perms.embed_links}
+    if with_file:
+        needed["Attach Files"] = perms.attach_files
+    return [name for name, ok in needed.items() if not ok]
 
 
 def admin_command(**kwargs):
@@ -555,6 +579,29 @@ class Giveaway(commands.Cog):
         # Closed panels lose their button entirely (view=None removes components)
         return {"wallet": WalletView, "feedback": FeedbackView}.get(self.store.phase, lambda _: None)(self)
 
+    def panel_content(self) -> tuple[discord.Embed, list[discord.File]]:
+        """The panel embed plus its banner image file, if one was set with /giveaway-start."""
+        embed = panel_embed(self.store)
+        name = self.store.get("panel_image")
+        if name and (IMAGE_DIR / name).is_file():
+            embed.set_image(url=f"attachment://{name}")
+            return embed, [discord.File(IMAGE_DIR / name, filename=name)]
+        return embed, []
+
+    async def post_panel(self, interaction: discord.Interaction, view: discord.ui.View) -> discord.Message | None:
+        """Posts the panel as the bot's own message (no "X used /command" header above it)."""
+        embed, files = self.panel_content()
+        missing = missing_post_perms(interaction.channel, with_file=bool(files))
+        if missing:
+            await interaction.followup.send(
+                f"❌ I can't post in this channel. Give me: **{', '.join(missing)}** here, then run it again.",
+                ephemeral=True,
+            )
+            return None
+        message = await interaction.channel.send(embed=embed, view=view, files=files)
+        self.store.save(panel_channel_id=message.channel.id, panel_message_id=message.id)
+        return message
+
     async def refresh_panel(self) -> bool:
         channel_id, message_id = self.store.get("panel_channel_id"), self.store.get("panel_message_id")
         if not (channel_id and message_id):
@@ -562,7 +609,12 @@ class Giveaway(commands.Cog):
         try:
             channel = self.bot.get_channel(int(channel_id)) or await self.bot.fetch_channel(int(channel_id))
             message = await channel.fetch_message(int(message_id))
-            await message.edit(embed=panel_embed(self.store), view=self.current_view())
+            embed, files = self.panel_content()
+            if files:
+                # Re-upload the banner: Discord's attachment links expire, a fresh upload never does
+                await message.edit(embed=embed, view=self.current_view(), attachments=files)
+            else:
+                await message.edit(embed=embed, view=self.current_view())
             return True
         except discord.HTTPException as e:
             print(f"[giveaway] could not update panel: {e}")
@@ -678,6 +730,7 @@ class Giveaway(commands.Cog):
         gacha_role="Role given to everyone who submits a wallet",
         eligible_role="A role allowed to submit (add more with /giveaway-role-add)",
         cap="Maximum number of wallets (default 500)",
+        image="Optional banner image shown in the panel (PNG, JPG, GIF or WebP, up to 8 MB)",
     )
     async def giveaway_start(
         self,
@@ -685,6 +738,7 @@ class Giveaway(commands.Cog):
         gacha_role: discord.Role,
         eligible_role: discord.Role | None = None,
         cap: app_commands.Range[int, 1, 10000] = DEFAULT_CAP,
+        image: discord.Attachment | None = None,
     ):
         me = interaction.guild.me
         if not me.guild_permissions.manage_roles or gacha_role >= me.top_role:
@@ -700,17 +754,32 @@ class Giveaway(commands.Cog):
             await interaction.response.send_message(f"❌ {problem}", ephemeral=True)
             return
 
-        self.store.save(phase="wallet", cap=cap, gacha_role_id=gacha_role.id)
+        if image and not ((image.content_type or "").startswith("image/") and image.size <= MAX_IMAGE_BYTES):
+            await interaction.response.send_message(
+                "❌ The banner must be an image (PNG, JPG, GIF or WebP) of 8 MB or less.", ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        image_name = None
+        if image:
+            # Keep our own copy: the upload's CDN link expires, and panel edits re-attach it
+            ext = Path(image.filename).suffix.lower() or ".png"
+            image_name = f"wallet-panel{ext}"
+            IMAGE_DIR.mkdir(parents=True, exist_ok=True)
+            await image.save(IMAGE_DIR / image_name)
+
+        self.store.save(phase="wallet", cap=cap, gacha_role_id=gacha_role.id, panel_image=image_name)
         if eligible_role:
             self.store.set_role_ids("wallet", self.store.role_ids("wallet") + [eligible_role.id])
         if not self.store.role_ids("feedback"):
             self.store.set_role_ids("feedback", [gacha_role.id])
 
-        await interaction.response.send_message(embed=panel_embed(self.store), view=WalletView(self))
-        message = await interaction.original_response()
-        self.store.save(panel_channel_id=message.channel.id, panel_message_id=message.id)
+        if not await self.post_panel(interaction, WalletView(self)):
+            return
         await interaction.followup.send(
-            f"Giveaway open. Gacha role: {gacha_role.mention}. Cap: {cap}. "
+            f"✅ Panel posted. Gacha role: {gacha_role.mention}. Cap: {cap}. "
+            f"{'Banner image attached. ' if image_name else ''}"
             "Add or remove eligible roles any time with /giveaway-role-add and /giveaway-role-remove.",
             embed=await self.role_summary(interaction.guild, "wallet"),
             ephemeral=True,
@@ -809,16 +878,24 @@ class Giveaway(commands.Cog):
             return
         if not self.store.role_ids("feedback"):
             self.store.set_role_ids("feedback", [self.store.gacha_role_id])
+        missing = missing_post_perms(interaction.channel)
+        if missing:
+            await interaction.response.send_message(
+                f"❌ I can't post in this channel. Give me: **{', '.join(missing)}** here, then run it again.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
         # The old wallet panel (possibly in another channel) becomes a closed panel with no button
         self.store.save(phase="closed")
         await self.refresh_panel()
 
-        self.store.save(phase="feedback")
-        await interaction.response.send_message(embed=panel_embed(self.store), view=FeedbackView(self))
-        message = await interaction.original_response()
-        self.store.save(panel_channel_id=message.channel.id, panel_message_id=message.id)
+        # The banner belongs to the wallet panel; the feedback panel is plain
+        self.store.save(phase="feedback", panel_image=None)
+        if not await self.post_panel(interaction, FeedbackView(self)):
+            return
         await interaction.followup.send(
-            "Feedback open, wallet submissions closed. Make sure these roles can see this channel. "
+            "✅ Feedback panel posted, wallet submissions closed. Make sure these roles can see this channel. "
             "Change them with /giveaway-role-add and /giveaway-role-remove (form: feedback).",
             embed=await self.role_summary(interaction.guild, "feedback"),
             ephemeral=True,
@@ -875,11 +952,18 @@ class Giveaway(commands.Cog):
                 allowed_mentions=discord.AllowedMentions.none(),
             )
             return
-        await interaction.response.send_message(
-            f"📦 Giveaway export by {interaction.user.mention}. {summary}",
-            file=discord.File(io.BytesIO(data), filename=name),
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
+        missing = missing_post_perms(interaction.channel, with_file=True)
+        if missing:
+            await interaction.response.send_message(
+                f"❌ I can't post in this channel (missing **{', '.join(missing)}**), so here's the export "
+                f"privately. Download it now: this message disappears when Discord reloads.\n{summary}",
+                file=discord.File(io.BytesIO(data), filename=name),
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_message("📦 Export posted.", ephemeral=True)
+        await post_export(interaction, data, name, summary)
+
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Giveaway(bot, GiveawayStore()))
